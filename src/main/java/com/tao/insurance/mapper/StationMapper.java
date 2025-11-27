@@ -34,4 +34,8 @@ public interface StationMapper {
             @Param("minLon") double minLon,
             @Param("maxLon") double maxLon
     );
+
+
+    @Select("select * from station;")
+    List<StationDistanceVO> getAllStations();
 }

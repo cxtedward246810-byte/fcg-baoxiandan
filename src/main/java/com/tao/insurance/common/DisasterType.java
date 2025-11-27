@@ -12,5 +12,7 @@ public enum DisasterType {
     RED_TIDE,       // 赤潮面积
     RAIN,           // 降雨量
     DROUGHT,        // 干旱等级/降雨量不足
-    HEAT_DAYS       // 高温日数（红树林）
+    HEAT_DAYS      // 高温日数（红树林）
+
+
 }

@@ -1,7 +1,6 @@
 package com.tao.insurance.engine.impl;
 
 import com.tao.insurance.common.DisasterType;
-import com.tao.insurance.common.InsuranceType;
 import com.tao.insurance.dto.CompensationStandardDTO;
 import com.tao.insurance.dto.InsuranceInput;
 import com.tao.insurance.engine.InsuranceCalculationEngine;
@@ -9,6 +8,8 @@ import com.tao.insurance.entity.FcOysterHeatRule;
 import com.tao.insurance.service.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
+
+import javax.script.ScriptEngineManager;
 
 @Component
 @RequiredArgsConstructor
@@ -156,12 +157,12 @@ public class InsuranceCalculationEngineImpl implements InsuranceCalculationEngin
                 dto.setRemark("防城港牡蛎-高温指数T");
                 return dto;
 
-            case RED_TIDE:
-                dto.setCompensateRate(
-                        fcOysterRedTideService.getRate(input.getHerbRuleType(), input.getRedTideArea())
-                );
-                dto.setRemark("防城港牡蛎-赤潮");
-                return dto;
+//            case RED_TIDE:
+//                dto.setCompensateRate(
+//                        fcOysterRedTideService.getRate(input.getHerbRuleType(), input.getRedTideArea())
+//                );
+//                dto.setRemark("防城港牡蛎-赤潮");
+//                return dto;
 
             default:
                 dto.setRemark("防城港牡蛎不支持该灾害类型");
@@ -181,17 +182,50 @@ public class InsuranceCalculationEngineImpl implements InsuranceCalculationEngin
     }
 
     private CompensationStandardDTO handleMangrove(InsuranceInput input, CompensationStandardDTO dto) {
+
+        // 红树林 - 高温日数
         if (input.getDisasterType() == DisasterType.HEAT_DAYS) {
-            dto.setFormula(mangroveService.getHeatFormula(input.getHotDays()));
-            dto.setRemark("红树林-高温日数");
-        } else if (input.getDisasterType() == DisasterType.WIND) {
+
+            // 1. 获取公式文本（如 "1.5% * n"）
+            String formula = mangroveService.getHeatFormula(input.getHotDays());
+
+            // 2. 计算 n（通常 n = hotDays）
+            int n = input.getHotDays();
+
+            // 3. 计算最终赔偿比例
+            double rate = computeMangroveHeatRate(formula, n);
+
+            dto.setCompensateRate(rate);
+            dto.setRemark("红树林-高温事故");
+
+            return dto;
+        }
+
+        // 红树林 - 风灾
+        if (input.getDisasterType() == DisasterType.WIND) {
             dto.setCompensateRate(mangroveService.getWindRate(input.getWindSpeed()));
             dto.setRemark("红树林-风灾");
         }
+
         return dto;
     }
+    private double computeMangroveHeatRate(String formula, int n) {
+        if (formula == null) return 0.0;
 
+        try {
+            // 例如： "1.5% * n"
+            String expr = formula.replace("%", "/100").replace("n", String.valueOf(n));
 
+            // 计算表达式
+            javax.script.ScriptEngine engine = new ScriptEngineManager().getEngineByName("JavaScript");
+            Object val = engine.eval(expr);
+
+            return val == null ? 0.0 : Double.parseDouble(val.toString());
+        } catch (Exception e) {
+            e.printStackTrace();
+            return 0.0;
+        }
+    }
     // -------------------- 文本生成 --------------------
 
     private String generateFcOysterDescription(InsuranceInput input, CompensationStandardDTO dto) {
@@ -244,11 +278,12 @@ public class InsuranceCalculationEngineImpl implements InsuranceCalculationEngin
     }
 
     private String generateMangroveDescription(InsuranceInput input, CompensationStandardDTO dto) {
+        // 高温日数（H）
         if (input.getDisasterType() == DisasterType.HEAT_DAYS) {
             return String.format(
-                    "红树林-高温事故：高温天数 %d 天，赔偿公式：%s。",
+                    "红树林-高温事故：高温天数 %d 天，赔偿比例 %.2f%%。",
                     input.getHotDays(),
-                    dto.getFormula()
+                    dto.getCompensateRate() * 100
             );
         }
         return String.format(
