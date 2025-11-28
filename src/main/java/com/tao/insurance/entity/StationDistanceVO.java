@@ -9,4 +9,6 @@ public class StationDistanceVO {
     private Double lon;
     private Double lat;
     private Double distance; // 距离（公里）
+    private Double value;
+    private String dateTime;
 }

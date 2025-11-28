@@ -20,6 +20,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.*;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -44,12 +46,22 @@ private StationMapper stationMapper;
 
 
         HashMap<String, String> params = getStringStringHashMap(req);
-        String TianQingResult = CMADAASService.read("http://10.159.90.120/music-ws/api?", params);
-        System.out.println(TianQingResult);
+        String TianQingResult;
+        try {
+            TianQingResult = runWithTimeout(
+                    () -> CMADAASService.read("http://10.159.90.120/music-ws/api?", params),
+                    10, TimeUnit.SECONDS
+            );
+        } catch (TimeoutException e) {
+            return ApiResponse.fail("天擎查询超时！（超过10秒无响应）");
+        } catch (Exception e) {
+            return ApiResponse.fail("天擎接口异常：" + e.getMessage());
+        }
+
         if (TianQingResult == null || TianQingResult.isEmpty()) {
-            System.out.println("No data received from API.");
             return ApiResponse.fail("No data received from TianQing.");
         }
+        System.out.println(TianQingResult);
 
         JSONObject obj = JSON.parseObject(TianQingResult);
         JSONArray dsArray = obj.getJSONArray("DS");
@@ -58,36 +70,82 @@ private StationMapper stationMapper;
         }
 
         if (insType.equals(InsuranceType.GOLDEN_POMPANO)||insType.equals(InsuranceType.SHRIMP)||insType.equals(InsuranceType.OYSTER)) {
-//筛选站号
-            List<String> highWindStations = dsArray.stream()
+            Map<String, JSONObject> dsMap = dsArray.stream()
                     .map(o -> (JSONObject) o)
+                    .collect(Collectors.toMap(
+                            r -> r.getString("Station_Id_C"),
+                            r -> r,
+                            (a, b) -> {
+                                // 比较风速，保留最大风速的那条记录
+                                double windA = a.getDoubleValue("MAX_WIN_S_Max");
+                                double windB = b.getDoubleValue("MAX_WIN_S_Max");
+                                return windA >= windB ? a : b;
+                            }
+                    ));
+// 2. 找出风级 > 10 的站号
+            List<String> highWindStations = dsMap.values().stream()
                     .filter(record -> {
                         double wind = record.getDoubleValue("MAX_WIN_S_Max");
                         int level = getWindLevel(wind);
-                        return level > 10;   // 风级大于10级
+                        return level > 10;
                     })
                     .map(record -> record.getString("Station_Id_C"))
                     .distinct()
                     .collect(Collectors.toList());
 
+// 3. 从 sd 过滤出风级 >10 的站点，并回填风速、时间等信息
             List<StationDistanceVO> resultList = sd.stream()
                     .filter(vo -> highWindStations.contains(vo.getStationNum()))
+                    .peek(vo -> {
+                        JSONObject rec = dsMap.get(vo.getStationNum());
+                        if (rec != null) {
+                            double wind = rec.getDoubleValue("MAX_WIN_S_Max");
+                            String dateTime = rec.getString("Datetime");
+
+                            vo.setValue(wind);
+                            vo.setDateTime(dateTime);
+                        }
+                    })
                     .collect(Collectors.toList());
+
             return ApiResponse.success(resultList);
 
+
         } else if(insType.equals(InsuranceType.FC_OYSTER)){
-            List<String> highWindStations = dsArray.stream()
+            Map<String, JSONObject> dsMap = dsArray.stream()
                     .map(o -> (JSONObject) o)
-                    .filter(record -> {
-                        double wind = record.getDoubleValue("MAX_WIN_S_Max");
-                        return wind > 17.2;
-                    })
+                    .collect(Collectors.toMap(
+                            r -> r.getString("Station_Id_C"),
+                            r -> r,
+                            (a, b) -> {
+                                // 比较风速，保留最大风速的那条记录
+                                double windA = a.getDoubleValue("MAX_WIN_S_Max");
+                                double windB = b.getDoubleValue("MAX_WIN_S_Max");
+                                return windA >= windB ? a : b;
+                            }
+                    ));
+// 2. 找出风速 > 17.2 的站号
+            List<String> highWindStations = dsMap.values().stream()
+                    .filter(record -> record.getDoubleValue("MAX_WIN_S_Max") > 17.2)
                     .map(record -> record.getString("Station_Id_C"))
                     .distinct()
                     .collect(Collectors.toList());
+
+// 3. 从 sd 中筛选站点，并回填 DS 中的风速、风级、时间等信息
             List<StationDistanceVO> resultList = sd.stream()
                     .filter(vo -> highWindStations.contains(vo.getStationNum()))
+                    .peek(vo -> {
+                        JSONObject rec = dsMap.get(vo.getStationNum());
+                        if (rec != null) {
+                            double wind = rec.getDoubleValue("MAX_WIN_S_Max");
+                            String dateTime = rec.getString("Datetime");
+
+                            vo.setValue(wind);
+                            vo.setDateTime(dateTime);
+                        }
+                    })
                     .collect(Collectors.toList());
+
             return ApiResponse.success(resultList);
         }
 
@@ -96,12 +154,42 @@ private StationMapper stationMapper;
     }
 
 
+    private static final ExecutorService executor = Executors.newCachedThreadPool();
 
+    public static <T> T runWithTimeout(Supplier<T> task, long timeout, TimeUnit unit)
+            throws TimeoutException, Exception {
+
+        Future<T> future = executor.submit(task::get);
+
+        try {
+            return future.get(timeout, unit);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw e;
+        } catch (ExecutionException e) {
+            throw new Exception(e.getCause());
+        } catch (InterruptedException e) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new Exception("任务被中断", e);
+        }
+    }
     public ApiResponse<Object> makeText(PolicyQueryRequest req) {
 
 
         HashMap<String, String> params = getStringStringHashMap(req);
-        String TianQingResult = CMADAASService.read("http://10.159.90.120/music-ws/api?", params);
+
+        String TianQingResult;
+        try {
+            TianQingResult = runWithTimeout(
+                    () -> CMADAASService.read("http://10.159.90.120/music-ws/api?", params),
+                    10, TimeUnit.SECONDS
+            );
+        } catch (TimeoutException e) {
+            return ApiResponse.fail("天擎查询超时！（超过10秒无响应）");
+        } catch (Exception e) {
+            return ApiResponse.fail("天擎接口异常：" + e.getMessage());
+        }
         System.out.println(TianQingResult);
         if (TianQingResult == null || TianQingResult.isEmpty()) {
             System.out.println("No data received from API.");
@@ -206,7 +294,7 @@ private StationMapper stationMapper;
     }
 
     private static HashMap<String, String> getStringStringHashMap(PolicyQueryRequest req) {
-        String elements="Station_Id_C";
+        String elements="Station_Id_C,Datetime";
 
 
 
